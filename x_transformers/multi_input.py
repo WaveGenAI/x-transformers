@@ -119,6 +119,7 @@ class MultiInputTransformerWrapper(Module):
         pos = None,
         prepend_embeds = None,
         prepend_mask = None,
+        prepend_before_pos_emb: bool = False,
         sum_embeds = None,
         return_attn_z_loss = False,
         attn_z_loss_weight = 1e-4,
@@ -128,7 +129,7 @@ class MultiInputTransformerWrapper(Module):
     ):
         assert not is_empty(x)
         first_input = list(x.values())[0]
-
+       
         b, n, device, num_mems, has_memory_tokens, emb_frac_gradient = *first_input.shape, first_input.device, self.num_memory_tokens, self.num_memory_tokens > 0, self.emb_frac_gradient
 
         return_hiddens = return_mems | return_attn | return_intermediates | return_attn_z_loss
@@ -148,11 +149,27 @@ class MultiInputTransformerWrapper(Module):
 
             token_emb = token_emb + embed
 
+        # prepend embeddings
+        
+        if exists(prepend_embeds):
+            prepend_seq, prepend_dim = prepend_embeds.shape[1:]
+            assert prepend_dim == token_emb.shape[-1], 'prepended embeddings need to have same dimensions as text model dimensions'
+
+            if exists(prepend_mask) or exists(mask):
+                mask = default(mask, lambda: torch.ones((b, n), device = device, dtype = torch.bool))
+                prepend_mask = default(prepend_mask, lambda: torch.ones((b, prepend_seq), device = device, dtype = torch.bool))
+
+                mask = torch.cat((prepend_mask, mask), dim = -1)
+
+            if prepend_before_pos_emb:
+                token_emb = torch.cat((prepend_embeds, token_emb), dim = -2)
+                first_input = token_emb[..., 0] # update first input for positional embedding, self.pos_emb use first_input only for shape
+             
         # absolute positional embedding
 
         external_pos_emb = exists(pos) and pos.dtype != torch.long
         pos_emb = self.pos_emb(first_input, pos = pos, seq_start_pos = seq_start_pos) if not external_pos_emb else pos        
-
+       
         token_emb = token_emb + pos_emb
 
         # for summing embeddings passed externally - needs this for self-conditioning in non-autoregressive training
@@ -170,17 +187,8 @@ class MultiInputTransformerWrapper(Module):
 
         # whether to append embeds, as in PaLI, for image embeddings
 
-        if exists(prepend_embeds):
-            prepend_seq, prepend_dim = prepend_embeds.shape[1:]
-            assert prepend_dim == x.shape[-1], 'prepended embeddings need to have same dimensions as text model dimensions'
-
+        if exists(prepend_embeds) and not prepend_before_pos_emb:
             x = torch.cat((prepend_embeds, x), dim = -2)
-
-            if exists(prepend_mask) or exists(mask):
-                mask = default(mask, lambda: torch.ones((b, n), device = device, dtype = torch.bool))
-                prepend_mask = default(prepend_mask, lambda: torch.ones((b, prepend_seq), device = device, dtype = torch.bool))
-
-                mask = torch.cat((prepend_mask, mask), dim = -1)
 
         # whether to reduce the gradient going to the embedding, from cogview paper, corroborated by GLM-130B model
 
